@@ -2536,6 +2536,23 @@ std::format(R"({{{}
 
 	FVectorPredefs.Functions =
 	{
+		/* Constructors functions */
+		PredefinedFunction {
+			.CustomComment = "",
+			.ReturnType = "", .NameWithParams = "FVector() : X(0), Y(0), Z(0)", .Body ="{}",
+			.bIsStatic = false, .bIsConst = false, .bIsBodyInline = true
+		},
+		PredefinedFunction {
+			.CustomComment = "",
+			.ReturnType = "", .NameWithParams = "FVector(UnderlayingType x, UnderlayingType y, UnderlayingType z) : X(x), Y(y), Z(z)", .Body = "{}",
+			.bIsStatic = false, .bIsConst = false, .bIsBodyInline = true
+		},
+		PredefinedFunction {
+			.CustomComment = "",
+			.ReturnType = "", .NameWithParams = "FVector(const FVector& Other) : X(Other.X), Y(Other.Y), Z(Other.Z)", .Body = "{}",
+			.bIsStatic = false, .bIsConst = false, .bIsBodyInline = true
+		},
+
 		/* const operators */
 		PredefinedFunction {
 			.CustomComment = "",
@@ -3706,6 +3723,14 @@ std::format(R"({{
 			.ReturnType = "int32", .NameWithParams = "GetDisplayIndex()", .Body =
 std::format(R"({{
 	return {};
+}}
+)", Settings::Internal::bUseCasePreservingName ? "DisplayIndex" : "ComparisonIndex"),
+				.bIsStatic = false, .bIsConst = true, .bIsBodyInline = true
+		},
+		PredefinedFunction {
+			.CustomComment = "", .ReturnType = "bool", .NameWithParams = "IsNone()", .Body =
+std::format(R"({{
+	return !Number && !{};
 }}
 )", Settings::Internal::bUseCasePreservingName ? "DisplayIndex" : "ComparisonIndex"),
 				.bIsStatic = false, .bIsConst = true, .bIsBodyInline = true

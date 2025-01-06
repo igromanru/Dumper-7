@@ -1,5 +1,7 @@
 #include <vector>
 
+#include <array>
+
 #include "CppGenerator.h"
 #include "ObjectArray.h"
 #include "MemberWrappers.h"
@@ -30,9 +32,9 @@ std::string CppGenerator::MakeMemberString(const std::string& Type, const std::s
 	return std::format("\t{:{}} {:{}} // {}\n", Type, 45, Name + ";", 50, std::move(Comment));
 }
 
-std::string CppGenerator::MakeMemberStringWithoutName(const std::string& Type, std::string&& Comment)
+std::string CppGenerator::MakeMemberStringWithoutName(const std::string& Type)
 {
-	return std::format("\t{:{}} // {}\n", Type + ";", 96, std::move(Comment));
+	return '\t' + Type + ";\n";
 }
 
 std::string CppGenerator::GenerateBytePadding(const int32 Offset, const int32 PadSize, std::string&& Reason)
@@ -166,7 +168,7 @@ std::string CppGenerator::GenerateMembers(const StructWrapper& Struct, const Mem
 		/* using directives */
 		if (Member.IsZeroSizedMember()) [[unlikely]]
 		{
-			OutMembers += MakeMemberStringWithoutName(GetMemberTypeString(Member, PackageIndex, bAllowForConstPtrMembers), std::move(Comment));
+			OutMembers += MakeMemberStringWithoutName(GetMemberTypeString(Member, PackageIndex, bAllowForConstPtrMembers));
 		}
 		else [[likely]]
 		{
@@ -591,6 +593,10 @@ std::string CppGenerator::GenerateFunctions(const StructWrapper& Struct, const M
 
 	for (const FunctionWrapper& Func : Members.IterateFunctions())
 	{
+		/* The function is no callable function, but instead just the signature of a TDelegate or TMulticastInlineDelegate */
+		if (Func.GetFunctionFlags() & EFunctionFlags::Delegate)
+			continue;
+
 		// Handeling spacing between static and non-static, const and non-const, as well as inline and non-inline functions
 		if (bWasLastFuncInline != Func.HasInlineBody() && !bIsFirstIteration)
 		{
@@ -763,7 +769,7 @@ void CppGenerator::GenerateStruct(const StructWrapper& Struct, StreamType& Struc
 		if (Struct.HasCustomTemplateText())
 			return;
 
-		std::string UniquePrefixedName = GetStructPrefixedName(Struct);
+		std::string UniquePrefixedName = StructNameOverride.empty() ? GetStructPrefixedName(Struct) : StructNameOverride;
 
 		const int32 StructSize = Struct.GetSize();
 
@@ -777,7 +783,7 @@ void CppGenerator::GenerateStruct(const StructWrapper& Struct, StreamType& Struc
 
 	if constexpr (Settings::Debug::bGenerateInlineAssertionsForStructMembers)
 	{
-		std::string StructName = GetStructPrefixedName(Struct);
+		std::string UniquePrefixedName = StructNameOverride.empty() ? GetStructPrefixedName(Struct) : StructNameOverride;
 
 		for (const PropertyWrapper& Member : Members.IterateMembers())
 		{
@@ -786,7 +792,7 @@ void CppGenerator::GenerateStruct(const StructWrapper& Struct, StreamType& Struc
 
 			std::string MemberName = Member.GetName();
 
-			StructFile << std::format("static_assert(offsetof({0}, {1}) == 0x{2:06X}, \"Member '{0}::{1}' has a wrong offset!\");\n", StructName, Member.GetName(), Member.GetOffset());
+			StructFile << std::format("static_assert(offsetof({0}, {1}) == 0x{2:06X}, \"Member '{0}::{1}' has a wrong offset!\");\n", UniquePrefixedName, Member.GetName(), Member.GetOffset());
 		}
 	}
 }
@@ -1078,9 +1084,16 @@ std::string CppGenerator::GetMemberTypeStringWithoutConst(UEProperty Member, int
 
 		return "TDelegate<void()>";
 	}
+	else if (Flags & EClassCastFlags::MulticasTMulticastInlineDelegateProperty)
+	{
+		if (UEFunction SignatureFunc = Member.Cast<UEMulticastInlineDelegateProperty>().GetSignatureFunction()) [[likely]]
+			return std::format("TMulticastInlineDelegate<{}>", GetFunctionSignature(SignatureFunc));
+
+		return "TMulticastInlineDelegate<void()>";
+	}
 	else if (Flags & EClassCastFlags::FieldPathProperty)
 	{
-		return std::format("TFieldPath<struct {}>", Member.Cast<UEFieldPathProperty>().GetFielClass().GetCppName());
+		return std::format("TFieldPath<class {}>", Member.Cast<UEFieldPathProperty>().GetFielClass().GetCppName());
 	}
 	else if (Flags & EClassCastFlags::OptionalProperty)
 	{
@@ -1381,6 +1394,9 @@ void CppGenerator::WriteFileHead(StreamType& File, PackageInfoHandle Package, EF
 {
 	namespace CppSettings = Settings::CppGenerator;
 
+	/* Write the utf8 BOM to indicate that this is a utf8 encoded file. */
+	File << "\xEF\xBB\xBF";
+
 	File << R"(#pragma once
 
 /*
@@ -1536,7 +1552,8 @@ void CppGenerator::Generate()
 		if (Package.IsEmpty())
 			continue;
 
-		std::string FileName = Settings::CppGenerator::FilePrefix + Package.GetName();
+		const std::string FileName = Settings::CppGenerator::FilePrefix + Package.GetName();
+		const std::u8string U8FileName = reinterpret_cast<const std::u8string&>(FileName);
 
 		StreamType ClassesFile;
 		StreamType StructsFile;
@@ -1546,7 +1563,7 @@ void CppGenerator::Generate()
 		/* Create files and handles namespaces and includes */
 		if (Package.HasClasses())
 		{
-			ClassesFile = StreamType(Subfolder / (FileName + "_classes.hpp"));
+			ClassesFile = StreamType(Subfolder / (U8FileName + u8"_classes.hpp"));
 
 			if (!ClassesFile.is_open())
 				std::cout << "Error opening file \"" << (FileName + "_classes.hpp") << "\"" << std::endl;
@@ -1559,7 +1576,7 @@ void CppGenerator::Generate()
 
 		if (Package.HasStructs() || Package.HasEnums())
 		{
-			StructsFile = StreamType(Subfolder / (FileName + "_structs.hpp"));
+			StructsFile = StreamType(Subfolder / (U8FileName + u8"_structs.hpp"));
 
 			if (!StructsFile.is_open())
 				std::cout << "Error opening file \"" << (FileName + "_structs.hpp") << "\"" << std::endl;
@@ -1572,7 +1589,7 @@ void CppGenerator::Generate()
 
 		if (Package.HasParameterStructs())
 		{
-			ParametersFile = StreamType(Subfolder / (FileName + "_parameters.hpp"));
+			ParametersFile = StreamType(Subfolder / (U8FileName + u8"_parameters.hpp"));
 
 			if (!ParametersFile.is_open())
 				std::cout << "Error opening file \"" << (FileName + "_parameters.hpp") << "\"" << std::endl;
@@ -1582,7 +1599,7 @@ void CppGenerator::Generate()
 
 		if (Package.HasFunctions())
 		{
-			FunctionsFile = StreamType(Subfolder / (FileName + "_functions.cpp"));
+			FunctionsFile = StreamType(Subfolder / (U8FileName + u8"_functions.cpp"));
 
 			if (!FunctionsFile.is_open())
 				std::cout << "Error opening file \"" << (FileName + "_functions.cpp") << "\"" << std::endl;
@@ -1827,7 +1844,7 @@ void CppGenerator::InitPredefinedMembers()
 		},
 	};
 
-	std::string PropertyTypePtr = Settings::Internal::bUseFProperty ? "struct FProperty*" : "class UProperty*";
+	std::string PropertyTypePtr = Settings::Internal::bUseFProperty ? "class FProperty*" : "class UProperty*";
 
 	std::vector<PredefinedMember> PropertyMembers =
 	{
@@ -2522,14 +2539,12 @@ std::format(R"({{{}
 
 	UEStruct Vector = ObjectArray::FindObjectFast<UEStruct>("Vector");
 
-	const bool bUseDoublesForVector = Vector.GetStructSize() > 0xC;
-
 	PredefinedElements& FVectorPredefs = PredefinedMembers[Vector.GetIndex()];
 
 	FVectorPredefs.Members.push_back(PredefinedMember{
 		PredefinedMember{
 			.Comment = "NOT AUTO-GENERATED PROPERTY",
-			.Type = std::format("using UnderlayingType = {}", (bUseDoublesForVector ? "double" : "float")), .Name = "", .Offset = 0x0, .Size = 0x08, .ArrayDim = 0x1, .Alignment = 0x8,
+			.Type = std::format("using UnderlayingType = {}", (Settings::Internal::bUseLargeWorldCoordinates ? "double" : "float")), .Name = "", .Offset = 0x0, .Size = 0x08, .ArrayDim = 0x1, .Alignment = 0x8,
 			.bIsStatic = true, .bIsZeroSizeMember = true, .bIsBitField = false, .BitIndex = 0xFF,
 		}
 	});
@@ -2745,12 +2760,210 @@ R"({
 		},
 	};
 
+	UEStruct Vector2D = ObjectArray::FindObjectFast<UEStruct>("Vector2D");
+
+	PredefinedElements& FVector2DPredefs = PredefinedMembers[Vector2D.GetIndex()];
+	FVector2DPredefs.Members.push_back(PredefinedMember{
+		PredefinedMember{
+			.Comment = "NOT AUTO-GENERATED PROPERTY",
+			.Type = std::format("using UnderlayingType = {}", (Settings::Internal::bUseLargeWorldCoordinates ? "double" : "float")), .Name = "", .Offset = 0x0, .Size = 0x08, .ArrayDim = 0x1, .Alignment = 0x8,
+			.bIsStatic = true, .bIsZeroSizeMember = true, .bIsBitField = false, .BitIndex = 0xFF,
+		}
+	});
+
+	FVector2DPredefs.Functions =
+	{
+		/* const operators */
+		PredefinedFunction {
+			.CustomComment = "",
+			.ReturnType = "FVector2D", .NameWithParams = "operator+(const FVector2D& Other)", .Body =
+R"({
+	return { X + Other.X, Y + Other.Y };
+})",
+			.bIsStatic = false, .bIsConst = true, .bIsBodyInline = true
+		},
+		PredefinedFunction {
+			.CustomComment = "",
+			.ReturnType = "FVector2D", .NameWithParams = "operator-(const FVector2D& Other)", .Body =
+R"({
+	return { X - Other.X, Y - Other.Y  };
+})",
+			.bIsStatic = false, .bIsConst = true, .bIsBodyInline = true
+		},
+		PredefinedFunction {
+			.CustomComment = "",
+			.ReturnType = "FVector2D", .NameWithParams = "operator*(float Scalar)", .Body =
+R"({
+	return { X * Scalar, Y * Scalar };
+})",
+			.bIsStatic = false, .bIsConst = true, .bIsBodyInline = true
+		},
+		PredefinedFunction {
+			.CustomComment = "",
+			.ReturnType = "FVector2D", .NameWithParams = "operator*(const FVector2D& Other)", .Body =
+R"({
+	return { X * Other.X, Y * Other.Y };
+})",
+			.bIsStatic = false, .bIsConst = true, .bIsBodyInline = true
+		},
+		PredefinedFunction {
+			.CustomComment = "",
+			.ReturnType = "FVector2D", .NameWithParams = "operator/(float Scalar)", .Body =
+R"({
+	if (Scalar == 0.0f)
+		return *this;
+
+	return { X / Scalar, Y / Scalar };
+})",
+			.bIsStatic = false, .bIsConst = true, .bIsBodyInline = true
+		},
+		PredefinedFunction {
+			.CustomComment = "",
+			.ReturnType = "FVector2D", .NameWithParams = "operator/(const FVector2D& Other)", .Body =
+R"({
+	if (Other.X == 0.0f || Other.Y == 0.0f)
+		return *this;
+
+	return { X / Other.X, Y / Other.Y };
+})",
+			.bIsStatic = false, .bIsConst = true, .bIsBodyInline = true
+		},
+		PredefinedFunction {
+			.CustomComment = "",
+			.ReturnType = "bool", .NameWithParams = "operator==(const FVector2D& Other)", .Body =
+R"({
+	return X == Other.X && Y == Other.Y;
+})",
+			.bIsStatic = false, .bIsConst = true, .bIsBodyInline = true
+		},
+		PredefinedFunction {
+			.CustomComment = "",
+			.ReturnType = "bool", .NameWithParams = "operator!=(const FVector2D& Other)", .Body =
+R"({
+	return X != Other.X || Y != Other.Y;
+})",
+			.bIsStatic = false, .bIsConst = true, .bIsBodyInline = true
+		},
+
+		/* Non-const operators */
+		PredefinedFunction {
+			.CustomComment = "",
+			.ReturnType = "FVector2D&", .NameWithParams = "operator+=(const FVector2D& Other)", .Body =
+R"({
+	*this = *this + Other;
+	return *this;
+})",
+			.bIsStatic = false, .bIsConst = false, .bIsBodyInline = true
+		},
+		PredefinedFunction {
+			.CustomComment = "",
+			.ReturnType = "FVector2D&", .NameWithParams = "operator-=(const FVector2D& Other)", .Body =
+R"({
+	*this = *this - Other;
+	return *this;
+})",
+			.bIsStatic = false, .bIsConst = false, .bIsBodyInline = true
+		},
+		PredefinedFunction {
+			.CustomComment = "",
+			.ReturnType = "FVector2D&", .NameWithParams = "operator*=(float Scalar)", .Body =
+R"({
+	*this = *this * Scalar;
+	return *this;
+})",
+			.bIsStatic = false, .bIsConst = false, .bIsBodyInline = true
+		},
+		PredefinedFunction {
+			.CustomComment = "",
+			.ReturnType = "FVector2D&", .NameWithParams = "operator*=(const FVector2D& Other)", .Body =
+R"({
+	*this = *this * Other;
+	return *this;
+})",
+			.bIsStatic = false, .bIsConst = false, .bIsBodyInline = true
+		},
+		PredefinedFunction {
+			.CustomComment = "",
+			.ReturnType = "FVector2D&", .NameWithParams = "operator/=(float Scalar)", .Body =
+R"({
+	*this = *this / Scalar;
+	return *this;
+})",
+			.bIsStatic = false, .bIsConst = false, .bIsBodyInline = true
+		},
+		PredefinedFunction {
+			.CustomComment = "",
+			.ReturnType = "FVector2D&", .NameWithParams = "operator/=(const FVector2D& Other)", .Body =
+R"({
+	*this = *this / Other;
+	return *this;
+})",
+			.bIsStatic = false, .bIsConst = false, .bIsBodyInline = true
+		},
+
+		/* Const functions */
+		PredefinedFunction {
+			.CustomComment = "",
+			.ReturnType = "bool", .NameWithParams = "IsZero()", .Body =
+R"({
+	return X == 0.0 && Y == 0.0;
+})",
+			.bIsStatic = false, .bIsConst = true, .bIsBodyInline = true
+		},
+		PredefinedFunction{
+			.CustomComment = "",
+			.ReturnType = "UnderlayingType", .NameWithParams = "Dot(const FVector2D& Other)", .Body =
+R"({
+	return (X * Other.X) + (Y * Other.Y);
+})",
+			.bIsStatic = false, .bIsConst = true, .bIsBodyInline = true
+		},
+		PredefinedFunction{
+			.CustomComment = "",
+			.ReturnType = "UnderlayingType", .NameWithParams = "Magnitude()", .Body =
+R"({
+	return std::sqrt((X * X) + (Y * Y));
+})",
+			.bIsStatic = false, .bIsConst = true, .bIsBodyInline = true
+		},
+		PredefinedFunction{
+			.CustomComment = "",
+			.ReturnType = "FVector2D", .NameWithParams = "GetNormalized()", .Body =
+R"({
+	return *this / Magnitude();
+})",
+			.bIsStatic = false, .bIsConst = true, .bIsBodyInline = true
+		},
+		PredefinedFunction{
+			.CustomComment = "",
+			.ReturnType = "UnderlayingType", .NameWithParams = "GetDistanceTo(const FVector2D& Other)", .Body =
+R"({
+	FVector2D DiffVector = Other - *this;
+	return DiffVector.Magnitude();
+})",
+			.bIsStatic = false, .bIsConst = true, .bIsBodyInline = true
+		},
+
+
+		/* Non-const functions */
+		PredefinedFunction{
+			.CustomComment = "",
+			.ReturnType = "FVector2D&", .NameWithParams = "Normalize()", .Body =
+R"({
+	*this /= Magnitude();
+	return *this;
+})",
+			.bIsStatic = false, .bIsConst = false, .bIsBodyInline = true
+		},
+	};
+
 	SortFunctions(UObjectPredefs.Functions);
 	SortFunctions(UClassPredefs.Functions);
 	SortFunctions(UEnginePredefs.Functions);
 	SortFunctions(UGameEnginePredefs.Functions);
 	SortFunctions(UWorldPredefs.Functions);
 	SortFunctions(FVectorPredefs.Functions);
+	SortFunctions(FVector2DPredefs.Functions);
 }
 
 
@@ -2763,15 +2976,16 @@ void CppGenerator::GenerateBasicFiles(StreamType& BasicHpp, StreamType& BasicCpp
 		std::sort(Members.begin(), Members.end(), ComparePredefinedMembers);
 	};
 
-	std::string CustomIncludes = R"(#include <string>
-#include <iostream>
-#include <Windows.h>
+	std::string CustomIncludes = R"(#define VC_EXTRALEAN
+#define WIN32_LEAN_AND_MEAN
+
+#include <string>
 #include <functional>
 #include <type_traits>
 )";
 
 	WriteFileHead(BasicHpp, nullptr, EFileType::BasicHpp, "Basic file containing structs required by the SDK", CustomIncludes);
-	WriteFileHead(BasicCpp, nullptr, EFileType::BasicCpp, "Basic file containing function-implementations from Basic.hpp");
+	WriteFileHead(BasicCpp, nullptr, EFileType::BasicCpp, "Basic file containing function-implementations from Basic.hpp", "#include <Windows.h>");
 
 
 	/* use namespace of UnrealContainers */
@@ -2811,9 +3025,7 @@ namespace InSDKUtils
 
 
 	/* Custom 'GetImageBase' function */
-	BasicHpp << std::format(R"(	inline uintptr_t GetImageBase()
-{}
-)", CppSettings::GetImageBaseFuncBody);
+	BasicHpp << "\tuintptr_t GetImageBase();\n\n";
 
 
 	/* GetVirtualFunction(const void* ObjectInstance, int32 Index) function */
@@ -2831,6 +3043,10 @@ namespace InSDKUtils
 
 	BasicHpp << "}\n\n";
 	// End Namespace 'InSDKUtils'
+
+	/* Custom 'GetImageBase' function */
+	BasicCpp << std::format(R"(uintptr_t InSDKUtils::GetImageBase()
+{})", Settings::CppGenerator::GetImageBaseFuncBody);
 
 	if constexpr (!Settings::CppGenerator::XORString)
 	{
@@ -3033,9 +3249,9 @@ ClassType* GetDefaultObjImpl()
 
 )";
 
-	// Start class 'TUObjectArray'
+	// Start class 'FUObjectItem'
 	PredefinedStruct FUObjectItem = PredefinedStruct{
-		.UniqueName = "FUObjectItem", .Size = Off::InSDK::ObjArray::FUObjectItemSize, .Alignment = 0x8, .bUseExplictAlignment = false, .bIsFinal = true, .bIsClass = false, .bIsUnion = false, .Super = nullptr  /* FProperty */
+		.UniqueName = "FUObjectItem", .Size = Off::InSDK::ObjArray::FUObjectItemSize, .Alignment = 0x8, .bUseExplictAlignment = false, .bIsFinal = true, .bIsClass = false, .bIsUnion = false, .Super = nullptr
 	};
 
 	FUObjectItem.Properties =
@@ -3049,107 +3265,186 @@ ClassType* GetDefaultObjImpl()
 
 	GenerateStruct(&FUObjectItem, BasicHpp, BasicCpp, BasicHpp);
 
-
 	constexpr const char* DefaultDecryption = R"([](void* ObjPtr) -> uint8*
 	{
 		return reinterpret_cast<uint8*>(ObjPtr);
 	})";
 
 	std::string DecryptionStrToUse = ObjectArray::DecryptionLambdaStr.empty() ? DefaultDecryption : std::move(ObjectArray::DecryptionLambdaStr);
-
-
+//#error Fix this and fix alignof(UObject) == 0x1
 	if (Off::InSDK::ObjArray::ChunkSize <= 0)
 	{
-		BasicHpp << std::format(R"(
-class TUObjectArray
-{{
-private:
-	static inline auto DecryptPtr = {};
+#undef max
+		const auto& ObjectsArrayLayout = Off::FUObjectArray::FixedLayout;
+		const int32 ObjectArraySize = std::max({ ObjectsArrayLayout.ObjectsOffset + 0x8, ObjectsArrayLayout.NumObjectsOffset + 0x4, ObjectsArrayLayout.MaxObjectsOffset + 0x4, });
+#define max(A, B) (A > B ? A : B)
 
-public:
-	FUObjectItem* Objects;
-	int32 MaxElements;
-	int32 NumElements;
+		// Start class 'TUObjectArray'
+		PredefinedStruct TUObjectArray = PredefinedStruct{
+			.UniqueName = "TUObjectArray", .Size = ObjectArraySize, .Alignment = 0x8, .bUseExplictAlignment = false, .bIsFinal = true, .bIsClass = true, .bIsUnion = false, .Super = nullptr
+		};
 
-public:
-	inline int Num() const
-	{{
-		return NumElements;
-	}}
+		TUObjectArray.Properties =
+		{
+			/* Static members of TUObjectArray */
+			PredefinedMember {
+				.Comment = "NOT AUTO-GENERATED PROPERTY",
+				.Type = ("static constexpr auto DecryptPtr = " + DecryptionStrToUse), .Offset = 0x0, .Size = 0x0, .ArrayDim = 0x1, .Alignment = 0x8,
+				.bIsStatic = true, .bIsZeroSizeMember = true, .bIsBitField = false, .BitIndex = 0xFF
+			},
 
-	inline FUObjectItem* GetDecrytedObjPtr() const
-	{{
-		return reinterpret_cast<FUObjectItem*>(DecryptPtr(Objects));
-	}}
+			/* Non-static members of TUObjectArray */
+			PredefinedMember {
+				.Comment = "NOT AUTO-GENERATED PROPERTY",
+				.Type = "struct FUObjectItem*", .Name = "Objects", .Offset = ObjectsArrayLayout.ObjectsOffset, .Size = 0x08, .ArrayDim = 0x1, .Alignment = 0x8,
+				.bIsStatic = false, .bIsZeroSizeMember = false, .bIsBitField = false, .BitIndex = 0xFF
+			},
+			PredefinedMember {
+				.Comment = "NOT AUTO-GENERATED PROPERTY",
+				.Type = "int32", .Name = "MaxElements", .Offset = ObjectsArrayLayout.MaxObjectsOffset, .Size = 0x04, .ArrayDim = 0x1, .Alignment = 0x8,
+				.bIsStatic = false, .bIsZeroSizeMember = false, .bIsBitField = false, .BitIndex = 0xFF
+			},
+			PredefinedMember {
+				.Comment = "NOT AUTO-GENERATED PROPERTY",
+				.Type = "int32", .Name = "NumElements", .Offset = ObjectsArrayLayout.NumObjectsOffset, .Size = 0x04, .ArrayDim = 0x1, .Alignment = 0x8,
+				.bIsStatic = false, .bIsZeroSizeMember = false, .bIsBitField = false, .BitIndex = 0xFF
+			},
+		};
 
-	inline class UObject* GetByIndex(const int32 Index) const
-	{{
-		if (Index < 0 || Index > NumElements)
-			return nullptr;
+		TUObjectArray.Functions =
+		{
+			PredefinedFunction {
+				.CustomComment = "",
+				.ReturnType = "inline int32", .NameWithParams = "Num()", .Body =
+R"({
+	return NumElements;
+}
+)",				.bIsStatic = false, .bIsConst = true, .bIsBodyInline = true
+			},
+			PredefinedFunction {
+				.CustomComment = "",
+				.ReturnType = "FUObjectItem*", .NameWithParams = "GetDecrytedObjPtr()", .Body =
+R"({
+	return reinterpret_cast<FUObjectItem*>(DecryptPtr(Objects));
+}
+)",				.bIsStatic = false, .bIsConst = true, .bIsBodyInline = true
+			},
+			PredefinedFunction {
+				.CustomComment = "",
+				.ReturnType = "inline class UObject*", .NameWithParams = "GetByIndex(const int32 Index)", .Body =
+R"({
+	if (Index < 0 || Index > NumElements)
+		return nullptr;
 
-		return GetDecrytedObjPtr()[Index].Object;
-	}}
-}};
-)", DecryptionStrToUse);
+	return GetDecrytedObjPtr()[Index].Object;
+})",
+				.bIsStatic = false, .bIsConst = true, .bIsBodyInline = true
+			},
+		};
+
+		SortMembers(TUObjectArray.Properties);
+		GenerateStruct(&TUObjectArray, BasicHpp, BasicCpp, BasicHpp);
 	}
 	else
 	{
-		constexpr const char* MemmberString = R"(
-	FUObjectItem** Objects;
-	uint8 Pad_0[0x08];
-	int32 MaxElements;
-	int32 NumElements;
-	int32 MaxChunks;
-	int32 NumChunks;)";
 
-		constexpr const char* MemberStringWeirdLayout = R"(
-	uint8 Pad_0[0x10];
-	int32 MaxElements;
-	int32 NumElements;
-	int32 MaxChunks;
-	int32 NumChunks;
-	FUObjectItem** Objects;)";
+#undef max
+		const auto& ObjectsArrayLayout = Off::FUObjectArray::ChunkedFixedLayout;
+		const int32 ObjectArraySize = std::max({
+			ObjectsArrayLayout.ObjectsOffset + 0x8,
+			ObjectsArrayLayout.MaxElementsOffset + 0x8,
+			ObjectsArrayLayout.NumElementsOffset + 0x4,
+			ObjectsArrayLayout.MaxChunksOffset + 0x4,
+			ObjectsArrayLayout.NumChunksOffset + 0x4
+		});
+#define max(A, B) (A > B ? A : B)
 
-		BasicHpp << std::format(R"(
-class TUObjectArray
-{{
-public:
-	enum
-	{{
-		ElementsPerChunk = 0x{:X},
-	}};
+		// Start class 'TUObjectArray'
+		PredefinedStruct TUObjectArray = PredefinedStruct{
+			.UniqueName = "TUObjectArray", .Size = ObjectArraySize, .Alignment = 0x8, .bUseExplictAlignment = false, .bIsFinal = true, .bIsClass = true, .bIsUnion = false, .Super = nullptr
+		};
 
-private:
-	static inline auto DecryptPtr = {};
+		TUObjectArray.Properties =
+		{
+			/* Static members of TUObjectArray */
+			PredefinedMember {
+				.Comment = "NOT AUTO-GENERATED PROPERTY",
+				.Type = ("static constexpr auto DecryptPtr = " + DecryptionStrToUse), .Offset = 0x0, .Size = 0x0, .ArrayDim = 0x1, .Alignment = 0x8,
+				.bIsStatic = true, .bIsZeroSizeMember = true, .bIsBitField = false, .BitIndex = 0xFF
+			},
+			PredefinedMember {
+				.Comment = "NOT AUTO-GENERATED PROPERTY",
+				.Type = "constexpr int32", .Name = "ElementsPerChunk", .Offset = 0x0, .Size = 0x4, .ArrayDim = 0x1, .Alignment = 0x8,
+				.bIsStatic = true, .bIsZeroSizeMember = false, .bIsBitField = false, .BitIndex = 0xFF, .DefaultValue = std::format("0x{:X}", Off::InSDK::ObjArray::ChunkSize)
+			},
 
-public:{}
+			/* Non-static members of TUObjectArray */
+			PredefinedMember {
+				.Comment = "NOT AUTO-GENERATED PROPERTY",
+				.Type = "struct FUObjectItem**", .Name = "Objects", .Offset = ObjectsArrayLayout.ObjectsOffset, .Size = 0x08, .ArrayDim = 0x1, .Alignment = 0x8,
+				.bIsStatic = false, .bIsZeroSizeMember = false, .bIsBitField = false, .BitIndex = 0xFF
+			},
+			PredefinedMember {
+				.Comment = "NOT AUTO-GENERATED PROPERTY",
+				.Type = "int32", .Name = "MaxElements", .Offset = ObjectsArrayLayout.MaxElementsOffset, .Size = 0x04, .ArrayDim = 0x1, .Alignment = 0x8,
+				.bIsStatic = false, .bIsZeroSizeMember = false, .bIsBitField = false, .BitIndex = 0xFF
+			},
+			PredefinedMember {
+				.Comment = "NOT AUTO-GENERATED PROPERTY",
+				.Type = "int32", .Name = "NumElements", .Offset = ObjectsArrayLayout.NumElementsOffset, .Size = 0x04, .ArrayDim = 0x1, .Alignment = 0x8,
+				.bIsStatic = false, .bIsZeroSizeMember = false, .bIsBitField = false, .BitIndex = 0xFF
+			},
+			PredefinedMember {
+				.Comment = "NOT AUTO-GENERATED PROPERTY",
+				.Type = "int32", .Name = "MaxChunks", .Offset = ObjectsArrayLayout.MaxChunksOffset, .Size = 0x04, .ArrayDim = 0x1, .Alignment = 0x8,
+				.bIsStatic = false, .bIsZeroSizeMember = false, .bIsBitField = false, .BitIndex = 0xFF
+			},
+			PredefinedMember {
+				.Comment = "NOT AUTO-GENERATED PROPERTY",
+				.Type = "int32", .Name = "NumChunks", .Offset = ObjectsArrayLayout.NumChunksOffset, .Size = 0x04, .ArrayDim = 0x1, .Alignment = 0x8,
+				.bIsStatic = false, .bIsZeroSizeMember = false, .bIsBitField = false, .BitIndex = 0xFF
+			},
+		};
 
-public:
-	inline int32 Num() const
-	{{
-		return NumElements;
-	}}
-
-	inline FUObjectItem** GetDecrytedObjPtr() const
-	{{
-		return reinterpret_cast<FUObjectItem**>(DecryptPtr(Objects));
-	}}
-
-	inline class UObject* GetByIndex(const int32 Index) const
-	{{
-		const int32 ChunkIndex = Index / ElementsPerChunk;
-		const int32 InChunkIdx = Index % ElementsPerChunk;
-
-		if (ChunkIndex >= NumChunks || Index >= NumElements)
-			return nullptr;
+		TUObjectArray.Functions =
+		{
+			PredefinedFunction {
+				.CustomComment = "",
+				.ReturnType = "inline int32", .NameWithParams = "Num()", .Body =
+R"({
+	return NumElements;
+}
+)",				.bIsStatic = false, .bIsConst = true, .bIsBodyInline = true
+			},
+			PredefinedFunction {
+				.CustomComment = "",
+				.ReturnType = "FUObjectItem**", .NameWithParams = "GetDecrytedObjPtr()", .Body =
+R"({
+	return reinterpret_cast<FUObjectItem**>(DecryptPtr(Objects));
+}
+)",				.bIsStatic = false, .bIsConst = true, .bIsBodyInline = true
+			},
+			PredefinedFunction {
+				.CustomComment = "",
+				.ReturnType = "inline class UObject*", .NameWithParams = "GetByIndex(const int32 Index)", .Body =
+R"({
+	const int32 ChunkIndex = Index / ElementsPerChunk;
+	const int32 InChunkIdx = Index % ElementsPerChunk;
 	
-		FUObjectItem* ChunkPtr = GetDecrytedObjPtr()[ChunkIndex];
-		if (!ChunkPtr) return nullptr;
+	if (ChunkIndex >= NumChunks || Index >= NumElements)
+	    return nullptr;
+	
+	FUObjectItem* ChunkPtr = GetDecrytedObjPtr()[ChunkIndex];
+	if (!ChunkPtr) return nullptr;
+	
+	return ChunkPtr[InChunkIdx].Object;
+})",
+				.bIsStatic = false, .bIsConst = true, .bIsBodyInline = true
+			},
+		};
 
-		return ChunkPtr[InChunkIdx].Object;
-	}}
-}};
-)", Off::InSDK::ObjArray::ChunkSize, DecryptionStrToUse, Off::FUObjectArray::Ptr == 0 ? MemmberString : MemberStringWeirdLayout);
+		SortMembers(TUObjectArray.Properties);
+		GenerateStruct(&TUObjectArray, BasicHpp, BasicCpp, BasicHpp);
 	}
 	// End class 'TUObjectArray'
 
@@ -3198,6 +3493,11 @@ public:)";
 			InitGObjects();
 
 		return reinterpret_cast<class TUObjectArray*>(GObjectsAddress);
+	}
+
+	inline TUObjectArray& operator*() const
+	{
+		return *reinterpret_cast<class TUObjectArray*>(GObjectsAddress);
 	}
 
 	inline operator const void* ()
@@ -3410,7 +3710,7 @@ R"({
 		};
 
 
-		if (Settings::Internal::bUseUoutlineNumberName)
+		if (Settings::Internal::bUseOutlineNumberName)
 		{
 			FStringData.Properties.push_back(
 				PredefinedMember{
@@ -3633,11 +3933,11 @@ R"({
 		});
 	}
 
-	if (!Settings::Internal::bUseUoutlineNumberName)
+	if (!Settings::Internal::bUseOutlineNumberName)
 	{
 		FName.Properties.push_back(PredefinedMember{
 			.Comment = "NOT AUTO-GENERATED PROPERTY",
-			.Type = "int32", .Name = "Number", .Offset = Off::FName::Number, .Size = 0x4, .ArrayDim = 0x1, .Alignment = 0x4,
+			.Type = (Settings::Internal::bUseNamePool ? "uint32" : "int32"), .Name = "Number", .Offset = Off::FName::Number, .Size = 0x4, .ArrayDim = 0x1, .Alignment = 0x4,
 			.bIsStatic = false, .bIsZeroSizeMember = false, .bIsBitField = false, .BitIndex = 0xFF,
 			}
 		);
@@ -3706,7 +4006,7 @@ R"({
 }
 )";
 
-	std::string GetRawStringBody = Off::InSDK::Name::AppendNameToString == 0 ? Settings::Internal::bUseUoutlineNumberName ? GetRawStringWithNameArrayWithOutlineNumber : GetRawStringWithNameArray : GetRawStringWithAppendString;
+	std::string GetRawStringBody = Off::InSDK::Name::AppendNameToString == 0 ? Settings::Internal::bUseOutlineNumberName ? GetRawStringWithNameArrayWithOutlineNumber : GetRawStringWithNameArray : GetRawStringWithAppendString;
 
 	FName.Functions =
 	{
@@ -3760,7 +4060,7 @@ std::format(R"({{
 			.ReturnType = "bool", .NameWithParams = "operator==(const FName& Other)", .Body =
 std::format(R"({{
 	return ComparisonIndex == Other.ComparisonIndex{};
-}})", !Settings::Internal::bUseUoutlineNumberName ? " && Number == Other.Number" : ""),
+}})", !Settings::Internal::bUseOutlineNumberName ? " && Number == Other.Number" : ""),
 			.bIsStatic = false, .bIsConst = true, .bIsBodyInline = true
 		},
 		PredefinedFunction {
@@ -3768,7 +4068,7 @@ std::format(R"({{
 			.ReturnType = "bool", .NameWithParams = "operator!=(const FName& Other)", .Body =
 std::format(R"({{
 	return ComparisonIndex != Other.ComparisonIndex{};
-}})", !Settings::Internal::bUseUoutlineNumberName ? " || Number != Other.Number" : ""),
+}})", !Settings::Internal::bUseOutlineNumberName ? " || Number != Other.Number" : ""),
 			.bIsStatic = false, .bIsConst = true, .bIsBodyInline = true
 		},
 	};
@@ -4390,6 +4690,30 @@ public:
 )";
 	} /* End 'if (Settings::Internal::bUseFProperty)' */
 
+	const auto ScriptDelegateSize = (FWeakObjectPtrSize + Off::InSDK::Name::FNameSize);
+
+	/* FScriptDelegate */
+	PredefinedStruct FScriptDelegate = PredefinedStruct{
+		.UniqueName = "FScriptDelegate", .Size = ScriptDelegateSize, .Alignment = 0x4, .bUseExplictAlignment = false, .bIsFinal = false, .bIsClass = false, .bIsUnion = false, .Super = nullptr
+	};
+
+	FScriptDelegate.Properties =
+	{
+		PredefinedMember {
+			.Comment = "NOT AUTO-GENERATED PROPERTY",
+			.Type = "FWeakObjectPtr", .Name = "Object", .Offset = 0x0, .Size = FWeakObjectPtrSize, .ArrayDim = 0x1, .Alignment = 0x4,
+			.bIsStatic = false, .bIsZeroSizeMember = false, .bIsBitField = false, .BitIndex = 0xFF
+		},
+		PredefinedMember {
+			.Comment = "NOT AUTO-GENERATED PROPERTY",
+			.Type = "FName", .Name = "FunctionName", .Offset = FWeakObjectPtrSize, .Size = Off::InSDK::Name::FNameSize, .ArrayDim = 0x1, .Alignment = 0x4,
+			.bIsStatic = false, .bIsZeroSizeMember = false, .bIsBitField = false, .BitIndex = 0xFF
+		},
+	};
+
+	GenerateStruct(&FScriptDelegate, BasicHpp, BasicCpp, BasicHpp);
+
+
 	/* TDelegate */
 	PredefinedStruct TDelegate = PredefinedStruct{
 		.CustomTemplateText = "template<typename FunctionSignature>",
@@ -4411,24 +4735,53 @@ public:
 	/* TDelegate<Ret(Args...)> */
 	PredefinedStruct TDelegateSpezialiation = PredefinedStruct{
 		.CustomTemplateText = "template<typename Ret, typename... Args>",
-		.UniqueName = "TDelegate<Ret(Args...)>", .Size = 0x0, .Alignment = 0x1, .bUseExplictAlignment = false, .bIsFinal = false, .bIsClass = true, .bIsUnion = false, .Super = nullptr
+		.UniqueName = "TDelegate<Ret(Args...)>", .Size = PropertySizes::DelegateProperty, .Alignment = 0x1, .bUseExplictAlignment = false, .bIsFinal = false, .bIsClass = true, .bIsUnion = false, .Super = nullptr
 	};
 
 	TDelegateSpezialiation.Properties =
 	{
 		PredefinedMember {
 			.Comment = "NOT AUTO-GENERATED PROPERTY",
-			.Type = "FWeakObjectPtr", .Name = "Object", .Offset = 0x0, .Size = FWeakObjectPtrSize, .ArrayDim = 0x1, .Alignment = 0x4,
+			.Type = "FScriptDelegate", .Name = "BoundFunction", .Offset = 0x0, .Size = ScriptDelegateSize, .ArrayDim = 0x1, .Alignment = 0x8,
 			.bIsStatic = false, .bIsZeroSizeMember = false, .bIsBitField = false, .BitIndex = 0xFF
-		},
+		}
+	};
+
+	GenerateStruct(&TDelegateSpezialiation, BasicHpp, BasicCpp, BasicHpp);
+
+	/* TMulticastInlineDelegate */
+	PredefinedStruct TMulticastInlineDelegate = PredefinedStruct{
+		.CustomTemplateText = "template<typename FunctionSignature>",
+		.UniqueName = "TMulticastInlineDelegate", .Size = 0x10, .Alignment = 0x8, .bUseExplictAlignment = false, .bIsFinal = false, .bIsClass = true, .bIsUnion = false, .Super = nullptr
+	};
+
+	TMulticastInlineDelegate.Properties =
+	{
 		PredefinedMember {
 			.Comment = "NOT AUTO-GENERATED PROPERTY",
-			.Type = "FName", .Name = "FunctionName", .Offset = FWeakObjectPtrSize, .Size = Off::InSDK::Name::FNameSize, .ArrayDim = 0x1, .Alignment = 0x4,
+			.Type = "struct InvalidUseOfTMulticastInlineDelegate", .Name = "TemplateParamIsNotAFunctionSignature", .Offset = 0x0, .Size = ScriptDelegateSize, .ArrayDim = 0x1, .Alignment = 0x1,
 			.bIsStatic = false, .bIsZeroSizeMember = false, .bIsBitField = false, .BitIndex = 0xFF
 		},
 	};
 
-	GenerateStruct(&TDelegateSpezialiation, BasicHpp, BasicCpp, BasicHpp);
+	GenerateStruct(&TMulticastInlineDelegate, BasicHpp, BasicCpp, BasicHpp);
+
+	/* TMulticastInlineDelegate<Ret(Args...)> */
+	PredefinedStruct TMulticastInlineDelegateSpezialiation = PredefinedStruct{
+		.CustomTemplateText = "template<typename Ret, typename... Args>",
+		.UniqueName = "TMulticastInlineDelegate<Ret(Args...)>", .Size = 0x0, .Alignment = 0x1, .bUseExplictAlignment = false, .bIsFinal = false, .bIsClass = true, .bIsUnion = false, .Super = nullptr
+	};
+
+	TMulticastInlineDelegateSpezialiation.Properties =
+	{
+		PredefinedMember {
+			.Comment = "NOT AUTO-GENERATED PROPERTY",
+			.Type = "TArray<FScriptDelegate>", .Name = "InvocationList", .Offset = 0x0, .Size = 0x10, .ArrayDim = 0x1, .Alignment = 0x8,
+			.bIsStatic = false, .bIsZeroSizeMember = false, .bIsBitField = false, .BitIndex = 0xFF
+		}
+	};
+
+	GenerateStruct(&TMulticastInlineDelegateSpezialiation, BasicHpp, BasicCpp, BasicHpp);
 
 
 	/* UE_ENUM_OPERATORS - enum flag operations */
@@ -4634,7 +4987,7 @@ enum class EClassCastFlags : uint64
 	SetProperty							= 0x0000800000000000,
 	EnumProperty						= 0x0001000000000000,
 	USparseDelegateFunction				= 0x0002000000000000,
-	FMulticastInlineDelegateProperty	= 0x0004000000000000,
+	FMulticasTMulticastInlineDelegateProperty	= 0x0004000000000000,
 	FMulticastSparseDelegateProperty	= 0x0008000000000000,
 	FFieldPathProperty					= 0x0010000000000000,
 	FLargeWorldCoordinatesRealProperty	= 0x0080000000000000,
@@ -4802,7 +5155,7 @@ using TActorBasedCycleFixup = CyclicDependencyFixupImpl::TCyclicClassFixup<Under
 void CppGenerator::GenerateUnrealContainers(StreamType& UEContainersHeader)
 {
 	WriteFileHead(UEContainersHeader, nullptr, EFileType::UnrealContainers, 
-		"Container implementations with iterators. See https://github.com/Fischsalat/UnrealContainers", "#include <string>\n#include <stdexcept>");
+		"Container implementations with iterators. See https://github.com/Fischsalat/UnrealContainers", "#include <string>\n#include <stdexcept>\n#include <iostream>");
 
 
 	UEContainersHeader << R"(
@@ -5093,7 +5446,7 @@ namespace UC
 		{
 			NumElements = 0;
 
-			if (!Data)
+			if (Data)
 				memset(Data, 0, NumElements * ElementSize);
 		}
 

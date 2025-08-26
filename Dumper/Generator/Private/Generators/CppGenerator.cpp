@@ -1396,6 +1396,8 @@ void CppGenerator::WriteFileHead(StreamType& File, PackageInfoHandle Package, EF
 	{
 		File << "#include \"../PropertyFixup.hpp\"\n";
 		File << "#include \"../UnrealContainers.hpp\"\n";
+		File << "#include \"StringUtils/StringUtils.hpp\"\n";
+		File << "#include \"NtUtils/Utils.hpp\"\n";
 		if (Settings::CppGenerator::XORStringInclude)
 		{
 			File << std::format("#include \"{}\"\n", Settings::CppGenerator::XORStringInclude);
@@ -2233,8 +2235,8 @@ void CppGenerator::InitPredefinedFunctions()
 		/* static non-inline functions */
 		PredefinedFunction {
 			.CustomComment = "Finds a UObject in the global object array by full-name, optionally with ECastFlags to reduce heavy string comparison",
-			.ReturnType = "class UObject*", .NameWithParams = "FindObjectImpl(const std::string& FullName, EClassCastFlags RequiredType = EClassCastFlags::None)",
-			.NameWithParamsWithoutDefaults = "FindObjectImpl(const std::string& FullName, EClassCastFlags RequiredType)", .Body =
+			.ReturnType = "class UObject*", .NameWithParams = "FindObjectImpl(const char* FullName, EClassCastFlags RequiredType = EClassCastFlags::None)",
+			.NameWithParamsWithoutDefaults = "FindObjectImpl(const char* FullName, EClassCastFlags RequiredType)", .Body =
 R"({
 	for (int i = 0; i < GObjects->Num(); ++i)
 	{
@@ -2243,7 +2245,8 @@ R"({
 		if (!Object)
 			continue;
 		
-		if (Object->HasTypeFlag(RequiredType) && Object->GetFullName() == FullName)
+		char Buffer[1024];
+		if (Object->HasTypeFlag(RequiredType) && Object->GetName(Buffer) > 0 && StringUtils::Equals(Buffer, FullName))
 			return Object;
 	}
 
@@ -2253,8 +2256,8 @@ R"({
 		},
 		PredefinedFunction {
 			.CustomComment = "Finds a UObject in the global object array by name, optionally with ECastFlags to reduce heavy string comparison",
-			.ReturnType = "class UObject*", .NameWithParams = "FindObjectFastImpl(const std::string& Name, EClassCastFlags RequiredType = EClassCastFlags::None)",
-			.NameWithParamsWithoutDefaults = "FindObjectFastImpl(const std::string& Name, EClassCastFlags RequiredType)", .Body =
+			.ReturnType = "class UObject*", .NameWithParams = "FindObjectFastImpl(const char* Name, EClassCastFlags RequiredType = EClassCastFlags::None)",
+			.NameWithParamsWithoutDefaults = "FindObjectFastImpl(const char* Name, EClassCastFlags RequiredType)", .Body =
 R"({
 	for (int i = 0; i < GObjects->Num(); ++i)
 	{
@@ -2263,7 +2266,8 @@ R"({
 		if (!Object)
 			continue;
 		
-		if (Object->HasTypeFlag(RequiredType) && Object->GetName() == Name)
+		char Buffer[1024];
+		if (Object->HasTypeFlag(RequiredType) && Object->GetName(Buffer) > 0 && StringUtils::Equals(Buffer, Name))
 			return Object;
 	}
 
@@ -2276,7 +2280,7 @@ R"({
 		PredefinedFunction {
 			.CustomComment = "",
 			.CustomTemplateText = "template<typename UEType = UObject>",
-			.ReturnType = "UEType*", .NameWithParams = "FindObject(const std::string& Name, EClassCastFlags RequiredType = EClassCastFlags::None)", .Body =
+			.ReturnType = "UEType*", .NameWithParams = "FindObject(const char* Name, EClassCastFlags RequiredType = EClassCastFlags::None)", .Body =
 R"({
 	return static_cast<UEType*>(FindObjectImpl(Name, RequiredType));
 })",
@@ -2285,7 +2289,7 @@ R"({
 		PredefinedFunction {
 			.CustomComment = "",
 			.CustomTemplateText = "template<typename UEType = UObject>",
-			.ReturnType = "UEType*", .NameWithParams = "FindObjectFast(const std::string& Name, EClassCastFlags RequiredType = EClassCastFlags::None)", .Body =
+			.ReturnType = "UEType*", .NameWithParams = "FindObjectFast(const char* Name, EClassCastFlags RequiredType = EClassCastFlags::None)", .Body =
 R"({
 	return static_cast<UEType*>(FindObjectFastImpl(Name, RequiredType));
 })",
@@ -2293,7 +2297,7 @@ R"({
 		},
 		PredefinedFunction {
 			.CustomComment = "",
-			.ReturnType = "class UClass*", .NameWithParams = "FindClass(const std::string& ClassFullName)", .Body =
+			.ReturnType = "class UClass*", .NameWithParams = "FindClass(const char* ClassFullName)", .Body =
 R"({
 	return FindObject<class UClass>(ClassFullName, EClassCastFlags::Class);
 })",
@@ -2301,7 +2305,7 @@ R"({
 		},
 		PredefinedFunction {
 			.CustomComment = "",
-			.ReturnType = "class UClass*", .NameWithParams = "FindClassFast(const std::string& ClassName)", .Body =
+			.ReturnType = "class UClass*", .NameWithParams = "FindClassFast(const char* ClassName)", .Body =
 R"({
 	return FindObjectFast<class UClass>(ClassName, EClassCastFlags::Class);
 }
@@ -2313,34 +2317,52 @@ R"({
 		/* non-static non-inline functions */
 		PredefinedFunction {
 			.CustomComment = "Retuns the name of this object",
-			.ReturnType = "std::string", .NameWithParams = "GetName()", .Body =
+			.ReturnType = "int", .NameWithParams = "GetName(char* OutName)", .Body =
 R"({
-	return this ? Name.ToString() : "None";
+	return Name.ToString(OutName);
 })",
 			.bIsStatic = false, .bIsConst = true, .bIsBodyInline = false
 		},
 		PredefinedFunction {
 			.CustomComment = "Returns the name of this object in the format 'Class Package.Outer.Object'",
-			.ReturnType = "std::string", .NameWithParams = "GetFullName()", .Body =
+			.ReturnType = "int", .NameWithParams = "GetFullName(char* OutFullName)", .Body =
 R"({
-	if (this && Class)
-	{
-		std::string Temp;
+	auto FullNameLen = -1;
 
-		for (UObject* NextOuter = Outer; NextOuter; NextOuter = NextOuter->Outer)
+	if (Class)
+	{
+		constexpr auto MaxStrLen = 1024;
+
+		char Temp[MaxStrLen];
+		Temp[0] = 0;
+		auto TempLen = 0;
+		for (auto OuterObj = Outer; OuterObj; OuterObj = OuterObj->Outer)
 		{
-			Temp = NextOuter->GetName() + "." + Temp;
+			char NameBuffer[MaxStrLen];
+			NameBuffer[0] = 0;
+			auto BuffLen = OuterObj->GetName(NameBuffer);
+			if (BuffLen <= 0) return -1;
+
+			NameBuffer[BuffLen++] = '.';
+			if (BuffLen + StringUtils::Copy(NameBuffer + BuffLen, Temp) >= MaxStrLen)
+				return -1;
+
+			TempLen = StringUtils::Copy(Temp, NameBuffer);
 		}
 
-		std::string Name = Class->GetName();
-		Name += " ";
-		Name += Temp;
-		Name += GetName();
+		FullNameLen = Class->GetName(OutFullName);
+		if (FullNameLen <= 0) return -1;
 
-		return Name;
+		OutFullName[FullNameLen++] = ' ';
+		if (TempLen > 0)
+		{
+			FullNameLen += StringUtils::Copy(OutFullName + FullNameLen, Temp);
+		}
+
+		FullNameLen += GetName(OutFullName + FullNameLen);
 	}
 
-	return "None";
+	return FullNameLen;
 })",
 			.bIsStatic = false, .bIsConst = true, .bIsBodyInline = false
 		},
@@ -2451,12 +2473,13 @@ R"({
 R"({
 	for(const UStruct* Clss = this; Clss; Clss = Clss->Super)
 	{
-		if (Clss->GetName() != ClassName)
+		char Buffer[1024];
+		if (Clss->GetName(Buffer) <= 0 || !StringUtils::Equals(Buffer, ClassName))
 			continue;
 			
 		for (UField* Field = Clss->Children; Field; Field = Field->Next)
 		{
-			if(Field->HasTypeFlag(EClassCastFlags::Function) && Field->GetName() == FuncName)
+			if(Field->HasTypeFlag(EClassCastFlags::Function) && Field->GetName(Buffer) > 0 && StringUtils::Equals(Buffer, FuncName))
 				return static_cast<class UFunction*>(Field);
 		}
 	}
@@ -3301,13 +3324,12 @@ void CppGenerator::GenerateBasicFiles(StreamType& BasicHpp, StreamType& BasicCpp
 	std::string CustomIncludes = R"(#define VC_EXTRALEAN
 #define WIN32_LEAN_AND_MEAN
 
-#include <string>
 #include <functional>
 #include <type_traits>
 )";
 
 	WriteFileHead(BasicHpp, nullptr, EFileType::BasicHpp, "Basic file containing structs required by the SDK", CustomIncludes);
-	WriteFileHead(BasicCpp, nullptr, EFileType::BasicCpp, "Basic file containing function-implementations from Basic.hpp", "#include <Windows.h>");
+	WriteFileHead(BasicCpp, nullptr, EFileType::BasicCpp, "Basic file containing function-implementations from Basic.hpp");
 
 
 	/* use namespace of UnrealContainers */
@@ -3393,10 +3415,10 @@ class FName;
 namespace BasicFilesImpleUtils
 {
 	// Helper functions for GetStaticClass and GetStaticBPGeneratedClass
-	UClass* FindClassByName(const std::string& Name, bool bByFullName = false);
-	UClass* FindClassByFullName(const std::string& Name);
+	UClass* FindClassByName(const char* Name, bool bByFullName = false);
+	UClass* FindClassByFullName(const char* Name);
 
-	std::string GetObjectName(class UClass* Class);
+	int GetObjectName(class UClass* Class, char* ObjectName);
 	int32 GetObjectIndex(class UClass* Class);
 
 	/* FName represented as a uint64. */
@@ -3411,19 +3433,19 @@ namespace BasicFilesImpleUtils
 )";
 
 	BasicCpp << R"(
-class UClass* BasicFilesImpleUtils::FindClassByName(const std::string& Name, bool bByFullName)
+class UClass* BasicFilesImpleUtils::FindClassByName(const char* Name, bool bByFullName)
 {
 	return bByFullName ? UObject::FindClass(Name) : UObject::FindClassFast(Name);
 }
 
-class UClass* BasicFilesImpleUtils::FindClassByFullName(const std::string& Name)
+class UClass* BasicFilesImpleUtils::FindClassByFullName(const char* Name)
 {
 	return UObject::FindClass(Name);
 }
 
-std::string BasicFilesImpleUtils::GetObjectName(class UClass* Class)
+int BasicFilesImpleUtils::GetObjectName(class UClass* Class, char* ObjectName)
 {
-	return Class->GetName();
+	return Class->GetName(ObjectName);
 }
 
 int32 BasicFilesImpleUtils::GetObjectIndex(class UClass* Class)
@@ -3927,14 +3949,17 @@ R"({
 			},
 			PredefinedFunction {
 				.CustomComment = "",
-				.ReturnType = "std::string", .NameWithParams = "GetString()", .Body =
+				.ReturnType = "int", .NameWithParams = "GetString(char* OutName)", .Body =
 R"({
 	if (IsWide())
 	{
-		return UtfN::Utf16StringToUtf8String<std::string>(Name.WideName, wcslen(Name.WideName));
+		wchar_t WideName[1024];
+		WideName[0] = 0;
+		StringUtils::Copy(WideName, Name.WideName, Header.Len);
+		return StringUtils::WStrToStrSafe(WideName, OutName);
 	}
 
-	return Name.AnsiName;
+	return StringUtils::Copy(OutName, Name.AnsiName, Header.Len);
 })",
 				.bIsStatic = false, .bIsConst = true, .bIsBodyInline = true
 			},
@@ -4351,12 +4376,14 @@ R"({
 	if (!GNames)
 		InitInternal();
 
-	std::string RetStr = FName::GNames->GetEntryByIndex(GetDisplayIndex())->GetString();
+	auto len = FName::GNames->GetEntryByIndex(GetDisplayIndex())->GetString(OutName);
+	if (Number > 0 && len > 0)
+	{
+		len += StringUtils::Copy(OutName + len, "_");
+		len += StringUtils::FromUInt(Number - 1, OutName + len);
+	}
 
-	if (Number > 0)
-		RetStr += ("_" + std::to_string(Number - 1));
-
-	return RetStr;
+	return len;
 }
 )";
 
@@ -4454,20 +4481,22 @@ std::format(R"({{
 		},
 		PredefinedFunction {
 			.CustomComment = "",
-			.ReturnType = "std::string", .NameWithParams = "GetRawString()", .Body = GetRawStringBody,
+			.ReturnType = "int", .NameWithParams = "GetRawString(char* OutName)", .Body = GetRawStringBody,
 			.bIsStatic = false, .bIsConst = true, .bIsBodyInline = true
 		},
 		PredefinedFunction {
 			.CustomComment = "",
-			.ReturnType = "std::string", .NameWithParams = "ToString()", .Body = R"({
-	std::string OutputString = GetRawString();
+			.ReturnType = "int", .NameWithParams = "ToString(char* OutName)", .Body = R"({
+	const auto len = GetRawString(OutName);
+	if (len < 0) return -1;
 
-	size_t pos = OutputString.rfind('/');
+	const auto pos = StringUtils::FindRight(OutName, '/');
+	if (pos >= 0)
+	{
+		return StringUtils::SubStr(OutName, OutName, pos + 1);
+	}
 
-	if (pos == std::string::npos)
-		return OutputString;
-
-	return OutputString.substr(pos + 1);
+	return len;
 }
 )",
 			.bIsStatic = false, .bIsConst = true, .bIsBodyInline = true
@@ -4632,9 +4661,17 @@ R"({
 		},
 		PredefinedFunction {
 			.CustomComment = "",
-			.ReturnType = "std::string", .NameWithParams = "ToString()", .Body =
+			.ReturnType = "int", .NameWithParams = "ToString(char* OutString)", .Body =
 R"({
-	return TextData->TextSource.ToString();
+	return TextData->TextSource.ToString(OutString);
+})",
+			.bIsStatic = false, .bIsConst = true, .bIsBodyInline = true
+		},
+		PredefinedFunction {
+			.CustomComment = "",
+			.ReturnType = "int", .NameWithParams = "ToWString(char* OutString)", .Body =
+R"({
+	return TextData->TextSource.ToWString(OutString);
 })",
 			.bIsStatic = false, .bIsConst = true, .bIsBodyInline = true
 		},
@@ -5172,7 +5209,7 @@ public:
 
 		constexpr char ZeroBytes[sizeof(OptionalType)];
 
-		return memcmp(GetValueBytes(), &ZeroBytes, sizeof(OptionalType)) == 0;
+		return MemoryCompare(GetValueBytes(), &ZeroBytes, sizeof(OptionalType)) == 0;
 	}
 
 	inline explicit operator bool() const
@@ -5653,7 +5690,7 @@ using TActorBasedCycleFixup = CyclicDependencyFixupImpl::TCyclicClassFixup<Under
 void CppGenerator::GenerateUnrealContainers(StreamType& UEContainersHeader)
 {
 	WriteFileHead(UEContainersHeader, nullptr, EFileType::UnrealContainers, 
-		"Container implementations with iterators. See https://github.com/Fischsalat/UnrealContainers", "#include <string>\n#include <stdexcept>\n#include <iostream>\n#include \"UtfN.hpp\"");
+		"Container implementations with iterators. See https://github.com/Fischsalat/UnrealContainers", "#include \"StringUtils/StringUtils.hpp\"\n#include \"NtUtils/Utils.hpp\"");
 
 
 	UEContainersHeader << R"(
@@ -5797,10 +5834,6 @@ namespace UC
 			FBitArray& operator=(FBitArray&&) = default;
 
 			FBitArray& operator=(const FBitArray& Other) = default;
-
-		private:
-			inline void VerifyIndex(int32 Index) const { if (!IsValidIndex(Index)) throw std::out_of_range("Index was out of range!"); }
-
 		public:
 			inline int32 Num() const { return NumBits; }
 			inline int32 Max() const { return MaxBits; }
@@ -5812,7 +5845,14 @@ namespace UC
 			inline bool IsValid() const { return GetData() && NumBits > 0; }
 
 		public:
-			inline bool operator[](int32 Index) const { VerifyIndex(Index); return GetData()[Index / NumBitsPerDWORD] & (1 << (Index & (NumBitsPerDWORD - 1))); }
+			inline bool operator[](int32 Index) const
+			{
+				if (IsValidIndex(Index))
+				{
+					return GetData()[Index / NumBitsPerDWORD] & (1 << (Index & (NumBitsPerDWORD - 1)));
+				}
+				return false;
+			}
 
 			inline bool operator==(const FBitArray& Other) const { return NumBits == Other.NumBits && GetData() == Other.GetData(); }
 			inline bool operator!=(const FBitArray& Other) const { return NumBits != Other.NumBits || GetData() != Other.GetData(); }
@@ -5906,8 +5946,6 @@ namespace UC
 	private:
 		inline int32 GetSlack() const { return MaxElements - NumElements; }
 
-		inline void VerifyIndex(int32 Index) const { if (!IsValidIndex(Index)) throw std::out_of_range("Index was out of range!"); }
-
 		inline       ArrayElementType& GetUnsafe(int32 Index)       { return Data[Index]; }
 		inline const ArrayElementType& GetUnsafe(int32 Index) const { return Data[Index]; }
 
@@ -5945,7 +5983,7 @@ namespace UC
 			NumElements = 0;
 
 			if (Data)
-				memset(Data, 0, NumElements * ElementSize);
+				MemoryZero(Data, NumElements * ElementSize);
 		}
 
 	public:
@@ -5959,13 +5997,13 @@ namespace UC
 		inline bool IsValid() const { return Data && NumElements > 0 && MaxElements >= NumElements; }
 
 	public:
-		inline       ArrayElementType& operator[](int32 Index)       { VerifyIndex(Index); return Data[Index]; }
-		inline const ArrayElementType& operator[](int32 Index) const { VerifyIndex(Index); return Data[Index]; }
+		inline       ArrayElementType& operator[](int32 Index)       { return Data[Index]; }
+		inline const ArrayElementType& operator[](int32 Index) const { return Data[Index]; }
 
 		inline bool operator==(const TArray<ArrayElementType>& Other) const { return Data == Other.Data; }
 		inline bool operator!=(const TArray<ArrayElementType>& Other) const { return Data != Other.Data; }
 
-		inline explicit operator bool() const { return IsValid(); };
+		inline explicit operator bool() const { return IsValid(); }
 
 	public:
 		template<typename T> friend Iterators::TArrayIterator<T> begin(const TArray& Array);
@@ -5975,14 +6013,14 @@ namespace UC
 	class FString : public TArray<wchar_t>
 	{
 	public:
-		friend std::ostream& operator<<(std::ostream& Stream, const UC::FString& Str) { return Stream << Str.ToString(); }
+		// friend std::ostream& operator<<(std::ostream& Stream, const UC::FString& Str) { return Stream << Str.ToString(); }
 
 	public:
 		using TArray::TArray;
 
 		FString(const wchar_t* Str)
 		{
-			const uint32 NullTerminatedLength = static_cast<uint32>(wcslen(Str) + 0x1);
+			const uint32 NullTerminatedLength = static_cast<uint32>(StringUtils::Len(Str) + 0x1);
 
 			Data = const_cast<wchar_t*>(Str);
 			NumElements = NullTerminatedLength;
@@ -5997,22 +6035,23 @@ namespace UC
 		}
 
 	public:
-		inline std::string ToString() const
+		inline int ToString(char* OutString) const
 		{
 			if (*this)
 			{
-				return UtfN::Utf16StringToUtf8String<std::string>(Data, NumElements  - 1); // Exclude null-terminator
+				return StringUtils::WStrToStrSafe(Data, OutString);
+				// return UtfN::Utf16StringToUtf8String<std::string>(Data, NumElements  - 1); // Exclude null-terminator
 			}
 
-			return "";
+			return -1;
 		}
 
-		inline std::wstring ToWString() const
+		inline int ToWString(wchar_t* OutString) const
 		{
 			if (*this)
-				return std::wstring(Data);
+				return StringUtils::Copy(OutString, Data);
 
-			return L"";
+			return -1;
 		}
 
 	public:
@@ -6020,75 +6059,8 @@ namespace UC
 		inline const wchar_t* CStr() const { return Data; }
 
 	public:
-		inline bool operator==(const FString& Other) const { return Other ? NumElements == Other.NumElements && wcscmp(Data, Other.Data) == 0 : false; }
-		inline bool operator!=(const FString& Other) const { return Other ? NumElements != Other.NumElements || wcscmp(Data, Other.Data) != 0 : true; }
-	};
-
-	/*
-	* Class to allow construction of a TArray, that uses c-style standard-library memory allocation.
-	* 
-	* Useful for calling functions that expect a buffer of a certain size and do not reallocate that buffer.
-	* This avoids leaking memory, if the array would otherwise be allocated by the engine, and couldn't be freed without FMemory-functions.
-	*/
-	template<typename ArrayElementType>
-	class TAllocatedArray : public TArray<ArrayElementType>
-	{
-	public:
-		TAllocatedArray() = delete;
-
-	public:
-		TAllocatedArray(int32 Size)
-		{
-			this->Data = static_cast<ArrayElementType*>(malloc(Size * sizeof(ArrayElementType)));
-			this->NumElements = 0x0;
-			this->MaxElements = Size;
-		}
-
-		~TAllocatedArray()
-		{
-			if (this->Data)
-				free(this->Data);
-
-			this->NumElements = 0x0;
-			this->MaxElements = 0x0;
-		}
-
-	public:
-		inline operator       TArray<ArrayElementType>()       { return *reinterpret_cast<      TArray<ArrayElementType>*>(this); }
-		inline operator const TArray<ArrayElementType>() const { return *reinterpret_cast<const TArray<ArrayElementType>*>(this); }
-	};
-
-	/*
-	* Class to allow construction of an FString, that uses c-style standard-library memory allocation.
-	*
-	* Useful for calling functions that expect a buffer of a certain size and do not reallocate that buffer.
-	* This avoids leaking memory, if the array would otherwise be allocated by the engine, and couldn't be freed without FMemory-functions.
-	*/
-	class FAllocatedString : public FString
-	{
-	public:
-		FAllocatedString() = delete;
-
-	public:
-		FAllocatedString(int32 Size)
-		{
-			Data = static_cast<wchar_t*>(malloc(Size * sizeof(wchar_t)));
-			NumElements = 0x0;
-			MaxElements = Size;
-		}
-
-		~FAllocatedString()
-		{
-			if (Data)
-				free(Data);
-
-			NumElements = 0x0;
-			MaxElements = 0x0;
-		}
-
-	public:
-		inline operator       FString()       { return *reinterpret_cast<      FString*>(this); }
-		inline operator const FString() const { return *reinterpret_cast<const FString*>(this); }
+		inline bool operator==(const FString& Other) const { return Other ? NumElements == Other.NumElements && StringUtils::Equals(Data, Other.Data) : false; }
+		inline bool operator!=(const FString& Other) const { return Other ? NumElements != Other.NumElements || !StringUtils::Equals(Data, Other.Data) : true; }
 	};)";
 
 	UEContainersHeader << R"(
@@ -6121,9 +6093,6 @@ namespace UC
 		TSparseArray& operator=(TSparseArray&&) = default;
 		TSparseArray& operator=(const TSparseArray&) = default;
 
-	private:
-		inline void VerifyIndex(int32 Index) const { if (!IsValidIndex(Index)) throw std::out_of_range("Index was out of range!"); }
-
 	public:
 		inline int32 NumAllocated() const { return Data.Num(); }
 
@@ -6138,8 +6107,8 @@ namespace UC
 		const ContainerImpl::FBitArray& GetAllocationFlags() const { return AllocationFlags; }
 
 	public:
-		inline       SparseArrayElementType& operator[](int32 Index)       { VerifyIndex(Index); return *reinterpret_cast<SparseArrayElementType*>(&Data.GetUnsafe(Index).ElementData); }
-		inline const SparseArrayElementType& operator[](int32 Index) const { VerifyIndex(Index); return *reinterpret_cast<SparseArrayElementType*>(&Data.GetUnsafe(Index).ElementData); }
+		inline       SparseArrayElementType& operator[](int32 Index)       { return *reinterpret_cast<SparseArrayElementType*>(&Data.GetUnsafe(Index).ElementData); }
+		inline const SparseArrayElementType& operator[](int32 Index) const { return *reinterpret_cast<SparseArrayElementType*>(&Data.GetUnsafe(Index).ElementData); }
 
 		inline bool operator==(const TSparseArray<SparseArrayElementType>& Other) const { return Data == Other.Data; }
 		inline bool operator!=(const TSparseArray<SparseArrayElementType>& Other) const { return Data != Other.Data; }
@@ -6178,9 +6147,6 @@ namespace UC
 		TSet& operator=(TSet&&) = default;
 		TSet& operator=(const TSet&) = default;
 
-	private:
-		inline void VerifyIndex(int32 Index) const { if (!IsValidIndex(Index)) throw std::out_of_range("Index was out of range!"); }
-
 	public:
 		inline int32 NumAllocated() const { return Elements.NumAllocated(); }
 
@@ -6214,9 +6180,6 @@ namespace UC
 
 	private:
 		TSet<ElementType> Elements;
-
-	private:
-		inline void VerifyIndex(int32 Index) const { if (!IsValidIndex(Index)) throw std::out_of_range("Index was out of range!"); }
 
 	public:
 		inline int32 NumAllocated() const { return Elements.NumAllocated(); }

@@ -4148,14 +4148,17 @@ R"({
 			},
 			PredefinedFunction {
 				.CustomComment = "",
-				.ReturnType = "std::string", .NameWithParams = "GetString()", .Body =
+				.ReturnType = "int", .NameWithParams = "GetString(char* OutName)", .Body =
 R"({
 	if (IsWide())
 	{
-		return UtfN::Utf16StringToUtf8String<std::string>(Name.WideName, Header.Len);
+		wchar_t WideName[1024];
+		WideName[0] = 0;
+		StringUtils::Copy(WideName, Name.WideName, Header.Len);
+		return StringUtils::WStrToStrSafe(WideName, OutName);
 	}
 
-	return std::string(Name.AnsiName, Header.Len);
+	return StringUtils::Copy(OutName, Name.AnsiName, Header.Len);
 })",
 				.bIsStatic = false, .bIsConst = true, .bIsBodyInline = true
 			},
@@ -4669,7 +4672,7 @@ R"({
 		},
 		PredefinedFunction {
 			.CustomComment = "",
-			.ReturnType = "int", .NameWithParams = "ToWString(char* OutString)", .Body =
+			.ReturnType = "int", .NameWithParams = "ToWString(wchar_t* OutString)", .Body =
 R"({
 	return TextData->TextSource.ToWString(OutString);
 })",

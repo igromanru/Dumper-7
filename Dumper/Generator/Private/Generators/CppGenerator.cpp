@@ -4377,7 +4377,7 @@ R"({
 	if (TempString.IsValid())
 	{
 		length = StringUtils::WStrToStrSafe(TempString.CStr(), OutName);
-		if (Number > 0)
+		if (Number > 0 && length > 0)
 		{
 			length += StringUtils::Copy(OutName + length, "_");
 			length += StringUtils::FromUInt(Number - 1, OutName + length);

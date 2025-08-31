@@ -4353,9 +4353,9 @@ R"({
 	auto length = 0;
 
 	if (TempString.IsValid())
-	{
+	{{
 		length = StringUtils::WStrToStrSafe(TempString.CStr(), OutName);
-	}
+	}}
 
 	return length;
 }}

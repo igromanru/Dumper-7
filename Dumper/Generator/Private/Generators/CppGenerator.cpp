@@ -4350,7 +4350,14 @@ R"({
 
 	InSDKUtils::CallGameFunction(reinterpret_cast<void({}*)(const FName*, FString&)>(AppendString), this, TempString);
 
-	return TempString.ToString();
+	auto length = 0;
+
+	if (TempString.IsValid())
+	{
+		length = StringUtils::WStrToStrSafe(TempString.CStr(), OutName);
+	}
+
+	return length;
 }}
 )", Settings::Is32Bit() ? "__thiscall" : "");
 
@@ -4365,12 +4372,19 @@ R"({
 	const void* NameEntry = InSDKUtils::CallGameFunction(reinterpret_cast<const void*(*)(uint32 CmpIdx)>(GetNameEntryFromName), ComparisonIndex);
 	InSDKUtils::CallGameFunction(reinterpret_cast<void(*)(const void*, FString&)>(AppendString), NameEntry, TempString);
 
-	std::string OutputString = TempString.ToString();
+	auto length = 0;
 
-	if (Number > 0)
-		OutputString += ("_" + std::to_string(Number - 1));
+	if (TempString.IsValid())
+	{
+		length = StringUtils::WStrToStrSafe(TempString.CStr(), OutName);
+		if (Number > 0)
+		{
+			length += StringUtils::Copy(OutName + length, "_");
+			length += StringUtils::FromUInt(Number - 1, OutName + length);
+		}
+	}
 
-	return OutputString;
+	return length;
 }
 )";
 

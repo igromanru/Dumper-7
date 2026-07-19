@@ -6,6 +6,9 @@
 #include <string>
 #include <algorithm>
 #include <functional>
+#include <bit>
+
+#include "Settings.h"
 
 /*
 Interface:
@@ -27,9 +30,9 @@ Interface:
 		-
 		-
 	General Interface:
-		- uintptr_t GetModuleBase(const char* const ModuleName = nullptr)
-		- uintptr_t GetOffset(uintptr_t Address, const char* const ModuleName = nullptr)
-		- uintptr_t GetOffset(void* Address, const char* const ModuleName = nullptr)
+		- uintptr_t GetModuleBase(const char* const ModuleName = Settings::General::DefaultModuleName)
+		- uintptr_t GetOffset(uintptr_t Address, const char* const ModuleName = Settings::General::DefaultModuleName)
+		- uintptr_t GetOffset(void* Address, const char* const ModuleName = Settings::General::DefaultModuleName)
 		-
 		- SectionInfo GetSectionInfo(const std::string& SectionName)
 		- void IterateSectionWithCallback(const SectionInfo& Info, std::function<bool(void* Address)> Callback, uint32_t Granularity = 0x4, uint32_t OffsetFromEnd = 0x0);
@@ -82,7 +85,7 @@ namespace PlatformWindows
 	T* FindAlignedValueInSection(const SectionInfo&, T, const int32_t);
 
 	template<typename T>
-	T* FindAlignedValueInAllSections(const T, const int32_t, const uintptr_t, int32_t, const char* const);
+	T* FindAlignedValueInAllSections(const T Value, const int32_t Alignment = alignof(T), const uintptr_t StartAddress = 0x0, int32_t Range = 0x0, const char* const ModuleName = Settings::General::DefaultModuleName);
 }
 
 class WindowsPrivateImplHelper
@@ -117,13 +120,13 @@ namespace PlatformWindows
 #endif
 	}
 
-	uintptr_t GetModuleBase(const char* const ModuleName = nullptr);
-	uintptr_t GetOffset(const uintptr_t Address, const char* const ModuleName = nullptr);
-	uintptr_t GetOffset(const void* Address, const char* const ModuleName = nullptr);
+	uintptr_t GetModuleBase(const char* const ModuleName = Settings::General::DefaultModuleName);
+	uintptr_t GetOffset(const uintptr_t Address, const char* const ModuleName = Settings::General::DefaultModuleName);
+	uintptr_t GetOffset(const void* Address, const char* const ModuleName = Settings::General::DefaultModuleName);
 	
-	SectionInfo GetSectionInfo(const std::string& SectionName, const char* const ModuleName = nullptr);
+	SectionInfo GetSectionInfo(const std::string& SectionName, const char* const ModuleName = Settings::General::DefaultModuleName);
 	void* IterateSectionWithCallback(const SectionInfo& Info, const std::function<bool(void* Address)>& Callback, uint32_t Granularity = 0x4, uint32_t OffsetFromEnd = 0x0);
-	void* IterateAllSectionsWithCallback(const std::function<bool(void* Address)>& Callback, uint32_t Granularity = 0x4, uint32_t OffsetFromEnd = 0x0, const char* const ModuleName = nullptr);
+	void* IterateAllSectionsWithCallback(const std::function<bool(void* Address)>& Callback, uint32_t Granularity = 0x4, uint32_t OffsetFromEnd = 0x0, const char* const ModuleName = Settings::General::DefaultModuleName);
 
 	bool IsAddressInAnyModule(const uintptr_t Address);
 	bool IsAddressInAnyModule(const void* Address);
@@ -140,14 +143,14 @@ namespace PlatformWindows
 	template<bool bShouldResolve32BitJumps = true>
 	std::pair<const void*, int32_t> IterateVTableFunctions(void** VTable, const std::function<bool(const uint8_t* Address, int32_t Index)>&CallBackForEachFunc, int32_t NumFunctions = 0x150, int32_t OffsetFromStart = 0x0);
 
-	void* FindPattern(const char* Signature, const uint32_t Offset = 0, const bool bSearchAllSections = false, const uintptr_t StartAddress = 0x0, const char* const ModuleName = nullptr);
+	void* FindPattern(const char* Signature, const uint32_t Offset = 0, const bool bSearchAllSections = false, const uintptr_t StartAddress = 0x0, const char* const ModuleName = Settings::General::DefaultModuleName);
 	void* FindPatternInRange(const char* Signature, const void* Start, const uintptr_t Range, const bool bRelative = false, const uint32_t Offset = 0);
 	void* FindPatternInRange(const char* Signature, const uintptr_t Start, const uintptr_t Range, const bool bRelative = false, const uint32_t Offset = 0);
 	void* FindPatternInRange(std::vector<int>&& Signature, const void* Start, const uintptr_t Range, const bool bRelative = false, uint32_t Offset = 0, const uint32_t SkipCount = 0);
 
 
 	template<bool bCheckIfLeaIsStrPtr = false, typename CharType = char>
-	void* FindByStringInAllSections(const CharType* RefStr, const uintptr_t StartAddress = 0x0, int32_t Range = 0x0, const bool bSearchOnlyExecutableSections = true, const char* const ModuleName = nullptr);
+	void* FindByStringInAllSections(const CharType* RefStr, const uintptr_t StartAddress = 0x0, int32_t Range = 0x0, const bool bSearchOnlyExecutableSections = true, const char* const ModuleName = Settings::General::DefaultModuleName);
 
 	template<bool bCheckIfLeaIsStrPtr, typename CharType>
 	void* FindStringInRange(const CharType* RefStr, const uintptr_t StartAddress, const int32_t Range);
@@ -175,8 +178,9 @@ namespace PlatformWindows
 		return static_cast<T*>(WindowsPrivateImplHelper::FindAlignedValueInSectionImpl(Info, &Value, ComparisonFunction, sizeof(Value), Alignment));
 	}
 
+	/* See forward declaration in line 87 for default argument values */
 	template<typename T>
-	T* FindAlignedValueInAllSections(const T Value, const int32_t Alignment = alignof(T), const uintptr_t StartAddress = 0x0, int32_t Range = 0x0, const char* const ModuleName = nullptr)
+	T* FindAlignedValueInAllSections(const T Value, const int32_t Alignment, const uintptr_t StartAddress, int32_t Range, const char* const ModuleName)
 	{
 		auto ComparisonFunction = [](const void* ValueAddr, const void* PotentialMatchAddr) -> bool
 		{
@@ -187,7 +191,7 @@ namespace PlatformWindows
 	}
 
 	template<typename T>
-	std::vector<T*> FindAllAlignedValuesInProcess(const T Value, const int32_t Alignment = alignof(T), const uintptr_t StartAddress = 0x0, int32_t Range = 0x0, const char* const ModuleName = nullptr)
+	std::vector<T*> FindAllAlignedValuesInProcess(const T Value, const int32_t Alignment = alignof(T), const uintptr_t StartAddress = 0x0, int32_t Range = 0x0, const char* const ModuleName = Settings::General::DefaultModuleName)
 	{
 		std::vector<T*> Ret;
 

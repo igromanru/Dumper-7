@@ -12,30 +12,28 @@
 
 enum class EFortToastType : uint8
 {
-        Default                        = 0,
-        Subdued                        = 1,
-        Impactful                      = 2,
-        EFortToastType_MAX             = 3,
+	Default                        = 0,
+	Subdued                        = 1,
+	Impactful                      = 2,
+	EFortToastType_MAX             = 3,
 };
 
 DWORD MainThread(HMODULE Module)
 {
 	AllocConsole();
 	FILE* Dummy;
-	freopen_s(&Dummy, "CONOUT$", "w", stderr);
 	freopen_s(&Dummy, "CONIN$", "r", stdin);
+	freopen_s(&Dummy, "CONOUT$", "w", stderr);
+	std::cerr.clear(); // clear internal error flags on cerr after redirect
+	std::cerr << std::boolalpha << std::hex;
 
-	auto t_1 = std::chrono::high_resolution_clock::now();
-
-	std::cerr << "Started Generation [Dumper-7]!\n";
+	std::cerr << "Initializing [Dumper-7]\n";
 
 	Settings::Config::Load();
+	Settings::Config::DelayDumperStart();
 
-	if (Settings::Config::SleepTimeout > 0)
-	{
-		std::cerr << "Sleeping for " << Settings::Config::SleepTimeout << "ms...\n";
-		Sleep(Settings::Config::SleepTimeout);
-	}
+	std::cerr << "Started Generation [Dumper-7]!\n";
+	auto DumpStartTime = std::chrono::high_resolution_clock::now();
 
 	Generator::InitEngineCore();
 	Generator::InitInternal();
@@ -66,19 +64,29 @@ DWORD MainThread(HMODULE Module)
 	Generator::Generate<IDAMappingGenerator>();
 	Generator::Generate<DumpspaceGenerator>();
 
-	auto t_C = std::chrono::high_resolution_clock::now();
+	auto DumpFinishTime = std::chrono::high_resolution_clock::now();
 
-	auto ms_int_ = std::chrono::duration_cast<std::chrono::milliseconds>(t_C - t_1);
-	std::chrono::duration<double, std::milli> ms_double_ = t_C - t_1;
+	std::chrono::duration<double, std::milli> DumpTime = DumpFinishTime - DumpStartTime;
 
-	std::cerr << "\n\nGenerating SDK took (" << ms_double_.count() << "ms)\n\n\n";
+	std::cerr << "\n\nGenerating SDK took (" << DumpTime.count() << "ms)\n\n\n";
+
+	if (Settings::Debug::bExecuteSDKTestScript)
+	{
+		/* Executes a python script to test if the SDK compiles correctly. */
+		CppGenerator::ExecuteSDKCompilationTestScript();
+	}
+
+	std::cerr << "\n\nPress F6 to unload\n\n\n";
 
 	while (true)
 	{
 		if (GetAsyncKeyState(VK_F6) & 1)
 		{
 			fclose(stderr);
-			if (Dummy) fclose(Dummy);
+			if (Dummy) 
+			{
+				fclose(Dummy);
+			}
 			FreeConsole();
 
 			FreeLibraryAndExitThread(Module, 0);

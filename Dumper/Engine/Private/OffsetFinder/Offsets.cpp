@@ -341,7 +341,18 @@ void Off::Init()
 		*/
 		Off::FField::Flags = Off::FField::Name + Off::InSDK::Name::FNameSize;
 		std::cerr << std::format("Off::FField::Flags: 0x{:X}\n", Off::FField::Flags);
+
+		Off::FField::EditorOnlyMetadata = OffsetFinder::FindFFieldEditorOnlyMetaDataOffset();
+		if (Off::FField::EditorOnlyMetadata != OffsetFinder::OffsetNotFound)
+			std::cerr << std::format("Off::FField::EditorOnlyMetadata: 0x{:X}\n", Off::FField::EditorOnlyMetadata);
+
+		Off::FFieldClass::CastFlags = OffsetFinder::FindFieldClassCastFlagsOffset();
+		std::cerr << std::format("Off::FFieldClass::CastFlags: 0x{:X}\n\n", Off::FFieldClass::CastFlags);
 	}
+
+	Off::UStruct::StructBaseChain = OffsetFinder::FindStructBaseChainOffset();
+	if (Off::UStruct::StructBaseChain != OffsetFinder::OffsetNotFound)
+		std::cerr << std::format("Off::UStruct::StructBaseChain: 0x{:X}\n", Off::UStruct::StructBaseChain);
 
 	Off::UClass::ClassDefaultObject = OffsetFinder::FindDefaultObjectOffset();
 	std::cerr << std::format("Off::UClass::ClassDefaultObject: 0x{:X}\n", Off::UClass::ClassDefaultObject);
@@ -351,6 +362,11 @@ void Off::Init()
 
 	Off::UEnum::Names = OffsetFinder::FindEnumNamesOffset();
 	std::cerr << std::format("Off::UEnum::Names: 0x{:X}\n", Off::UEnum::Names) << std::endl;
+
+	Off::UEnum::UnderlyingType = OffsetFinder::FindEnumUnderlayingTypeOffset();
+
+	if (Settings::Internal::bHasUnderlayingTypeInUEnum)
+		std::cerr << std::format("Off::UEnum::UnderlyingType: 0x{:X}\n", Off::UEnum::UnderlyingType) << std::endl;
 
 	Off::UFunction::FunctionFlags = OffsetFinder::FindFunctionFlagsOffset();
 	std::cerr << std::format("Off::UFunction::FunctionFlags: 0x{:X}\n", Off::UFunction::FunctionFlags);
@@ -428,18 +444,22 @@ void Off::Init()
 	Off::OptionalProperty::ValueProperty = Off::InSDK::Properties::PropertySize;
 
 	Off::ClassProperty::MetaClass = Off::ObjectProperty::PropertyClass + sizeof(void*); //0x8 inheritance from ObjectProperty
+
+	Off::FInstancedStruct::ScriptStruct = 0x00;
+	Off::FInstancedStruct::StructMemory = Off::FInstancedStruct::ScriptStruct + sizeof(void*);
 }
 
 void PropertySizes::Init()
 {
 	InitTDelegateSize();
 	InitFFieldPathSize();
+	InitTMulticastInlineDelegateSize();
 }
 
 void PropertySizes::InitTDelegateSize()
 {
 	/* If the AudioComponent class or the OnQueueSubtitles member weren't found, fallback to looping GObjects and looking for a Delegate. */
-	auto OnPropertyNotFoudn = [&]() -> void
+	auto OnPropertyNotFound = [&]() -> void
 	{
 		for (UEObject Obj : ObjectArray())
 		{
@@ -460,12 +480,12 @@ void PropertySizes::InitTDelegateSize()
 	const UEClass AudioComponentClass = ObjectArray::FindClassFast("AudioComponent");
 
 	if (!AudioComponentClass)
-		return OnPropertyNotFoudn();
+		return OnPropertyNotFound();
 
 	const UEProperty OnQueueSubtitlesProp = AudioComponentClass.FindMember("OnQueueSubtitles", EClassCastFlags::DelegateProperty);
 
 	if (!OnQueueSubtitlesProp)
-		return OnPropertyNotFoudn();
+		return OnPropertyNotFound();
 
 	PropertySizes::DelegateProperty = OnQueueSubtitlesProp.GetSize();
 }
@@ -476,7 +496,7 @@ void PropertySizes::InitFFieldPathSize()
 		return;
 
 	/* If the SetFieldPathPropertyByName function or the Value parameter weren't found, fallback to looping GObjects and looking for a Delegate. */
-	auto OnPropertyNotFoudn = [&]() -> void
+	auto OnPropertyNotFound = [&]() -> void
 	{
 		for (UEObject Obj : ObjectArray())
 		{
@@ -497,12 +517,46 @@ void PropertySizes::InitFFieldPathSize()
 	const UEFunction SetFieldPathPropertyByNameFunc = ObjectArray::FindObjectFast<UEFunction>("SetFieldPathPropertyByName", EClassCastFlags::Function);
 
 	if (!SetFieldPathPropertyByNameFunc)
-		return OnPropertyNotFoudn();
+		return OnPropertyNotFound();
 
 	const UEProperty ValueParamProp = SetFieldPathPropertyByNameFunc.FindMember("Value", EClassCastFlags::FieldPathProperty);
 
 	if (!ValueParamProp)
-		return OnPropertyNotFoudn();
+		return OnPropertyNotFound();
 
 	PropertySizes::FieldPathProperty = ValueParamProp.GetSize();
+}
+
+void PropertySizes::InitTMulticastInlineDelegateSize()
+{
+	/* If the AudioComponent class or the OnQueueSubtitles member weren't found, fallback to looping GObjects and looking for a Delegate. */
+	auto OnPropertyNotFound = [&]() -> void
+		{
+			for (UEObject Obj : ObjectArray())
+			{
+				if (!Obj.IsA(EClassCastFlags::Struct))
+					continue;
+
+				for (UEProperty Prop : Obj.Cast<UEClass>().GetProperties())
+				{
+					if (Prop.IsA(EClassCastFlags::MulticastInlineDelegateProperty))
+					{
+						PropertySizes::DelegateProperty = Prop.GetSize();
+						return;
+					}
+				}
+			}
+		};
+
+	const UEClass EmitterClass = ObjectArray::FindClassFast("Emitter");
+
+	if (!EmitterClass)
+		return OnPropertyNotFound();
+
+	const UEProperty OnParticleSpawn = EmitterClass.FindMember("OnParticleSpawn", EClassCastFlags::MulticastDelegateProperty);
+
+	if (!OnParticleSpawn)
+		return OnPropertyNotFound();
+
+	PropertySizes::MulticastInlineDelegateProperty = OnParticleSpawn.GetSize();
 }
